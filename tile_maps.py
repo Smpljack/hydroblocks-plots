@@ -353,13 +353,13 @@ print("Finished combining dataframes")
 #%%
 # Create a datashader map
 plot1 = create_datashader_map(
-    mdata_df, title=var, unit=unit, resolution=4, show_borders=True, 
+    mdata_df, title=var, unit=unit, resolution=2, show_borders=True, 
     cmap=all_palettes['Viridis'][256])
 plot2 = create_datashader_map(
-    dem_data_df, title='tile elevation', unit='m', resolution=4, show_borders=True,
+    dem_data_df, title='tile elevation', unit='m', resolution=2, show_borders=True,
     cmap=all_palettes['Viridis'][256])
 plot3 = create_datashader_map(
-    tid_data_df, title='tile ID', resolution=4, show_borders=True,
+    tid_data_df, title='tile ID', resolution=2, show_borders=True,
     cmap=all_palettes['Iridescent'][tid_data_df['tile ID'].max()],
     vmin=0, vmax=tid_data_df['tile ID'].max())
 all_plots = row(plot1, plot2, plot3)
@@ -369,3 +369,5 @@ save(all_plots, filename='tile_maps_no_orog_disag.html')
 
 # if __name__ == '__main__':
 #     main()
+
+# %%
