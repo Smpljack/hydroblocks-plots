@@ -330,11 +330,11 @@ year_range = range(1980, 2015)
 var = 'precip'
 unit = 'mm/day'
 var_scale = 86400
-mdata_paths = ['/archive/m2p/awg/2023.04/'
-            'c96L33_am4p0_cmip6Diag_a2p_irrHB_repro/'
+mdata_paths = ['/archive/m2p/awg/2023.04_orog_disag/'
+            'c96L33_am4p0_cmip6Diag_orog_disag/'
             'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land_ptid/ts/'
             f'monthly/1yr/land_ptid.{year}01-{year}12.{var}.tile{cube_face}.nc' 
-            for year in year_range if year != 1994]
+            for year in year_range]
 print("Loading mdata")
 mdata = xr.open_mfdataset(mdata_paths)[f'{var}'].mean('time')*var_scale
 print("Finished loading mdata")
@@ -353,19 +353,19 @@ print("Finished combining dataframes")
 #%%
 # Create a datashader map
 plot1 = create_datashader_map(
-    mdata_df, title=var, unit=unit, resolution=2, show_borders=True, 
+    mdata_df, title=var, unit=unit, resolution=1, show_borders=True, 
     cmap=all_palettes['Viridis'][256])
 plot2 = create_datashader_map(
-    dem_data_df, title='tile elevation', unit='m', resolution=2, show_borders=True,
+    dem_data_df, title='tile elevation', unit='m', resolution=1, show_borders=True,
     cmap=all_palettes['Viridis'][256])
 plot3 = create_datashader_map(
-    tid_data_df, title='tile ID', resolution=2, show_borders=True,
+    tid_data_df, title='tile ID', resolution=1, show_borders=True,
     cmap=all_palettes['Iridescent'][tid_data_df['tile ID'].max()],
     vmin=0, vmax=tid_data_df['tile ID'].max())
 all_plots = row(plot1, plot2, plot3)
 #%%
 # Save the plots as HTML
-save(all_plots, filename='tile_maps_no_orog_disag.html')
+save(all_plots, filename='tile_maps_orog_disag_lr.html')
 
 # if __name__ == '__main__':
 #     main()
