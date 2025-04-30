@@ -1,7 +1,6 @@
 #%%
 import xarray as xr
 import numpy as np
-import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import h5py
 from bokeh.models import HoverTool, ColorBar,BasicTicker
@@ -108,7 +107,7 @@ def get_mdata_hr_for_loc_and_time(
 def create_datashader_map(
         combined_df, title=None, unit=None, cmap=all_palettes['Viridis'][256], 
         width=800, height=600, resolution=2, show_borders=True, 
-        vmin=None, vmax=None):
+        vmin=None, vmax=None, agg_func='mean'):
     """
     Create a high-resolution map visualization using Datashader, 
     combining multiple DataArrays into a single plot.
@@ -139,6 +138,9 @@ def create_datashader_map(
     vmax : float, optional
         Maximum value for the color scale. 
         If None, will use the maximum value of the DataArray.
+    agg_func : str, optional
+        Aggregation function to use. Can be either 'mean' or 'nearest'.
+        Default is 'mean'.
     Returns
     -------
     bokeh.plotting.figure.Figure
@@ -192,8 +194,13 @@ def create_datashader_map(
     # Get the value column name
     value_col = combined_df.columns[-1]
     
-    # Aggregate the data
-    agg = cvs.points(combined_df, 'lon', 'lat', ds.mean(value_col))
+    # Aggregate the data based on the specified aggregation function
+    if agg_func == 'mean':
+        agg = cvs.points(combined_df, 'lon', 'lat', ds.mean(value_col))
+    elif agg_func == 'nearest':
+        agg = cvs.points(combined_df, 'lon', 'lat', ds.first(value_col))
+    else:
+        raise ValueError("agg_func must be either 'mean' or 'nearest'")
     
     # Create a source for the image
     source = bokeh.models.ColumnDataSource({
@@ -354,14 +361,15 @@ print("Finished combining dataframes")
 # Create a datashader map
 plot1 = create_datashader_map(
     mdata_df, title=var, unit=unit, resolution=1, show_borders=True, 
-    cmap=all_palettes['Viridis'][256])
+    cmap=all_palettes['Viridis'][256], agg_func='mean',
+    vmin=0, vmax=6)
 plot2 = create_datashader_map(
     dem_data_df, title='tile elevation', unit='m', resolution=1, show_borders=True,
-    cmap=all_palettes['Viridis'][256])
+    cmap=all_palettes['Viridis'][256], agg_func='mean')
 plot3 = create_datashader_map(
     tid_data_df, title='tile ID', resolution=1, show_borders=True,
     cmap=all_palettes['Iridescent'][tid_data_df['tile ID'].max()],
-    vmin=0, vmax=tid_data_df['tile ID'].max())
+    vmin=0, vmax=tid_data_df['tile ID'].max(), agg_func='nearest')
 all_plots = row(plot1, plot2, plot3)
 #%%
 # Save the plots as HTML
