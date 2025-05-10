@@ -2,7 +2,6 @@
 import xarray as xr
 import numpy as np
 import cartopy.feature as cfeature
-import h5py
 from bokeh.models import HoverTool, ColorBar,BasicTicker
 from bokeh.palettes import all_palettes
 from bokeh.plotting import figure
@@ -15,31 +14,70 @@ import tqdm
 from tqdm.contrib.concurrent import thread_map
 import bokeh
 import os
+from process_utils import process_grid_cell, read_dem_terrain_data, load_ptile_data
 
-from process_utils import process_grid_cell
-    
 
-def load_ptile_data(cube_face):
+def create_locstrs(cube_face, grid_xt_range, grid_yt_range):
     """
-    Load the ptiles data for a given cube face.
+    Create a list of location strings for a given cube face and grid range.
     
     Parameters
     ----------
     cube_face : int
-        Cube face number
+        The cube face number.
+    grid_xt_range : range
+        The range of x coordinates.
+    grid_yt_range : range
+        The range of y coordinates.
     
     Returns
     -------
-    h5py.File
-        The ptiles data.
+    list
+        A list of location strings.
     """
-    ptile_filename = f'/archive/Marc.Prange/ptiles/ptiles.face{cube_face}.h5'
-    ptile_file = h5py.File(ptile_filename, 'r')
-    return ptile_file
+    locstrs = [f'tile:{cube_face},is:{i},js:{j}' 
+    for i in grid_yt_range for j in grid_xt_range 
+    if os.path.exists(
+        '/archive/Rui.Wang/lightning_test_20250422/'
+        f'tile:{cube_face},is:{i},js:{j}')]
+    return locstrs
 
-def get_mdata_hr_for_loc_and_time(
-        mdata, grid_xt_range, grid_yt_range, cube_face, num_threads=None, 
-        use_multiprocessing=True):
+def get_dem_terrain_data_for_loc_ranges(
+        locstrs, num_threads=None, use_multiprocessing=True,
+        project_width=None, project_height=None):
+    """
+    Get the DEM/terrain data for a given location string.
+    
+    Parameters
+    ----------
+    locstrs : list
+        List of location strings
+    num_threads : int, optional
+        Number of threads to use. If None, uses cpu_count() - 1
+    use_multiprocessing : bool, optional
+        Whether to use multiprocessing. If False, processes sequentially.
+    project_width : int, optional
+        Width of the projected grid.
+    project_height : int, optional
+        Height of the projected grid.
+    """
+    args_list = [(locstr, project_width, project_height) for locstr in locstrs]
+    if use_multiprocessing:
+        if num_threads is None:
+            num_threads = os.cpu_count()
+        # Process grid cells in parallel
+        results = thread_map(
+            read_dem_terrain_data, args_list, max_workers=num_threads)
+    else:
+        # Process grid cells sequentially
+        results = []
+        for args in tqdm.tqdm(args_list, desc="Processing tiles"):
+            results.append(read_dem_terrain_data(*args))
+    return results
+
+def get_mdata_hr_for_loc_ranges(
+        mdata, ptile_data, locstrs, num_threads=None, 
+        use_multiprocessing=True, project_width=None, project_height=None):
     """
     Get high-resolution data for multiple locations 
     and times using multiprocessing.
@@ -48,39 +86,33 @@ def get_mdata_hr_for_loc_and_time(
     ----------
     mdata : xarray.DataArray
         Input data array
-    grid_xt_range : range
-        Range of x coordinates
-    grid_yt_range : range
-        Range of y coordinates
-    cube_face : int
-        Cube face number
+    ptile_data : h5py.File
+        Ptiles data
+    locstrs : list
+        List of location strings
     num_threads : int, optional
         Number of threads to use. If None, uses cpu_count() - 1
     use_multiprocessing : bool, optional
         Whether to use multiprocessing. If False, processes sequentially.
+    project_width : int, optional
+        Width of the projected grid.
+    project_height : int, optional
+        Height of the projected grid.
     
     Returns
     -------
     tuple
         (mdata_loc_hr_list, dem_data_hr_list, tid_hr_data_list)
     """
-    if num_threads is None:
-        num_threads = os.cpu_count()
-    
-    locstrs = [f'tile:{cube_face},is:{i},js:{j}' 
-    for i in grid_yt_range for j in grid_xt_range 
-    if os.path.exists(
-        '/archive/Rui.Wang/lightning_test_20250422/'
-        f'tile:{cube_face},is:{i},js:{j}')
-    ]
-    ptile_data = load_ptile_data(cube_face)
     # Create argument tuples for each grid cell
     args_list = [(
-        mdata, locstr, ptile_data['grid_data'][locstr]['soil/tile'][()]) 
+        mdata, locstr, ptile_data['grid_data'][locstr]['soil/tile'][()],
+        project_width, project_height) 
         for locstr in locstrs 
         if 'soil/tile' in ptile_data['grid_data'][locstr].keys()]
-    ptile_data.close()
     if use_multiprocessing:
+        if num_threads is None:
+            num_threads = os.cpu_count()
         # Process grid cells in parallel
         results = thread_map(
             process_grid_cell, args_list, max_workers=num_threads)
@@ -92,17 +124,15 @@ def get_mdata_hr_for_loc_and_time(
     
     # Separate the results
     mdata_loc_hr_list = []
-    dem_data_hr_list = []
     tid_hr_data_list = []
     
     for result in results:
         if result is not None:
-            mdata_loc_hr, dem_data_hr, tid_hr_data = result
+            mdata_loc_hr, tid_hr_data = result
             mdata_loc_hr_list.append(mdata_loc_hr)
-            dem_data_hr_list.append(dem_data_hr)
             tid_hr_data_list.append(tid_hr_data)
     
-    return mdata_loc_hr_list, dem_data_hr_list, tid_hr_data_list
+    return mdata_loc_hr_list, tid_hr_data_list
 
 def create_datashader_map(
         combined_df, title=None, unit=None, cmap=all_palettes['Viridis'][256], 
@@ -331,34 +361,49 @@ def combine_da_list_to_df(da_list):
     combined_df = pd.concat(dfs, ignore_index=True)
     return combined_df
 #%%
-# Prepare the data
+# Setup parameters
 cube_face = 5
 year_range = range(1980, 2015)
 var = 'precip'
 unit = 'mm/day'
 var_scale = 86400
+project_width = 500 # number of sub-grid pixels to project high-res data onto
+project_height = 500
+use_multiprocessing = True
+num_threads = os.cpu_count()
 mdata_paths = ['/archive/m2p/awg/2023.04_orog_disag/'
             'c96L33_am4p0_cmip6Diag_orog_disag/'
             'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land_ptid/ts/'
             f'monthly/1yr/land_ptid.{year}01-{year}12.{var}.tile{cube_face}.nc' 
             for year in year_range]
-print("Loading mdata")
-mdata = xr.open_mfdataset(mdata_paths)[f'{var}'].mean('time')*var_scale
-print("Finished loading mdata")
+# Load the model data
+mdata = xr.open_mfdataset(mdata_paths)[f'{var}'].mean('time').load()*var_scale
+# Load the ptile data
+ptile_data = load_ptile_data(cube_face)
+#%%
+# Select grid cells and create locstrs
 grid_xt_range = range(1, 25)
 grid_yt_range = range(15, 80)
-# Prepare lists of high-res data for each pixel to plot
-print("Loading high-res data and mapping out model data")
-mdata_loc_hr_list, dem_data_hr_list, tid_hr_data_list = \
-    get_mdata_hr_for_loc_and_time(mdata, grid_xt_range, grid_yt_range, cube_face, 
-    use_multiprocessing=True, num_threads=os.cpu_count())
-print("Combining high-res data into dataframes")
+locstrs = create_locstrs(cube_face, grid_xt_range, grid_yt_range)
+
+# Prepare lists of high-res data for each cell
+mdata_loc_hr_list, tid_hr_data_list = \
+    get_mdata_hr_for_loc_ranges(
+        mdata, ptile_data, locstrs, 
+        use_multiprocessing=use_multiprocessing, num_threads=num_threads,
+        project_width=project_width, project_height=project_height)
+#%%
+# Prepare lists of high-res DEM elevation data for each cell
+dem_data_hr_list = get_dem_terrain_data_for_loc_ranges(
+    locstrs, num_threads=num_threads, use_multiprocessing=use_multiprocessing,
+    project_width=project_width, project_height=project_height)
+#%%
+# Combine the data into dataframes (1D, HR pixel-by-pixel)
 mdata_df = combine_da_list_to_df(mdata_loc_hr_list)
 dem_data_df = combine_da_list_to_df(dem_data_hr_list)
 tid_data_df = combine_da_list_to_df(tid_hr_data_list)
-print("Finished combining dataframes")
 #%%
-# Create a datashader map
+# Create datashader maps
 plot1 = create_datashader_map(
     mdata_df, title=var, unit=unit, resolution=1, show_borders=True, 
     cmap=all_palettes['Viridis'][256], agg_func='mean',
@@ -374,8 +419,3 @@ all_plots = row(plot1, plot2, plot3)
 #%%
 # Save the plots as HTML
 save(all_plots, filename='tile_maps_orog_disag_lr.html')
-
-# if __name__ == '__main__':
-#     main()
-
-# %%
