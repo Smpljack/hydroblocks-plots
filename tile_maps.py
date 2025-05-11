@@ -10,12 +10,11 @@ from bokeh.layouts import row
 output_notebook()
 import datashader as ds
 import pandas as pd
-import tqdm
-from tqdm.contrib.concurrent import thread_map
 import bokeh
 import os
-from process_utils import process_grid_cell, read_dem_terrain_data, load_ptile_data
-
+from process_utils import (get_dem_terrain_data_for_locstrs, 
+                           load_ptile_data, get_tid_hr_data_for_locstrs,
+                           map_mdata_to_tid_hr_list)
 
 def create_locstrs(cube_face, grid_xt_range, grid_yt_range):
     """
@@ -42,101 +41,9 @@ def create_locstrs(cube_face, grid_xt_range, grid_yt_range):
         f'tile:{cube_face},is:{i},js:{j}')]
     return locstrs
 
-def get_dem_terrain_data_for_loc_ranges(
-        locstrs, num_threads=None, use_multiprocessing=True,
-        project_width=None, project_height=None):
-    """
-    Get the DEM/terrain data for a given location string.
-    
-    Parameters
-    ----------
-    locstrs : list
-        List of location strings
-    num_threads : int, optional
-        Number of threads to use. If None, uses cpu_count() - 1
-    use_multiprocessing : bool, optional
-        Whether to use multiprocessing. If False, processes sequentially.
-    project_width : int, optional
-        Width of the projected grid.
-    project_height : int, optional
-        Height of the projected grid.
-    """
-    args_list = [(locstr, project_width, project_height) for locstr in locstrs]
-    if use_multiprocessing:
-        if num_threads is None:
-            num_threads = os.cpu_count()
-        # Process grid cells in parallel
-        results = thread_map(
-            read_dem_terrain_data, args_list, max_workers=num_threads)
-    else:
-        # Process grid cells sequentially
-        results = []
-        for args in tqdm.tqdm(args_list, desc="Processing tiles"):
-            results.append(read_dem_terrain_data(*args))
-    return results
-
-def get_mdata_hr_for_loc_ranges(
-        mdata, ptile_data, locstrs, num_threads=None, 
-        use_multiprocessing=True, project_width=None, project_height=None):
-    """
-    Get high-resolution data for multiple locations 
-    and times using multiprocessing.
-    
-    Parameters
-    ----------
-    mdata : xarray.DataArray
-        Input data array
-    ptile_data : h5py.File
-        Ptiles data
-    locstrs : list
-        List of location strings
-    num_threads : int, optional
-        Number of threads to use. If None, uses cpu_count() - 1
-    use_multiprocessing : bool, optional
-        Whether to use multiprocessing. If False, processes sequentially.
-    project_width : int, optional
-        Width of the projected grid.
-    project_height : int, optional
-        Height of the projected grid.
-    
-    Returns
-    -------
-    tuple
-        (mdata_loc_hr_list, dem_data_hr_list, tid_hr_data_list)
-    """
-    # Create argument tuples for each grid cell
-    args_list = [(
-        mdata, locstr, ptile_data['grid_data'][locstr]['soil/tile'][()],
-        project_width, project_height) 
-        for locstr in locstrs 
-        if 'soil/tile' in ptile_data['grid_data'][locstr].keys()]
-    if use_multiprocessing:
-        if num_threads is None:
-            num_threads = os.cpu_count()
-        # Process grid cells in parallel
-        results = thread_map(
-            process_grid_cell, args_list, max_workers=num_threads)
-    else:
-        # Process grid cells sequentially
-        results = []
-        for args in tqdm.tqdm(args_list, desc="Processing tiles"):
-            results.append(process_grid_cell(args))
-    
-    # Separate the results
-    mdata_loc_hr_list = []
-    tid_hr_data_list = []
-    
-    for result in results:
-        if result is not None:
-            mdata_loc_hr, tid_hr_data = result
-            mdata_loc_hr_list.append(mdata_loc_hr)
-            tid_hr_data_list.append(tid_hr_data)
-    
-    return mdata_loc_hr_list, tid_hr_data_list
-
 def create_datashader_map(
         combined_df, title=None, unit=None, cmap=all_palettes['Viridis'][256], 
-        width=800, height=600, resolution=2, show_borders=True, 
+        width=800, height=600, resolution=1, show_borders=True, 
         vmin=None, vmax=None, agg_func='mean'):
     """
     Create a high-resolution map visualization using Datashader, 
@@ -148,6 +55,8 @@ def create_datashader_map(
         DataFrame containing the combined data from multiple DataArrays.
     title : str, optional
         Title for the plot. If None, will use the first DataArray's name.
+    unit : str, optional
+        Unit for the color scale. If None, will not display the unit.
     cmap : list or str, optional
         Colormap to use for visualization. Default is Viridis256.
     width : int, optional
@@ -338,6 +247,8 @@ def create_datashader_map(
 def combine_da_list_to_df(da_list):
     """
     Combine a list of DataArrays into a single pandas DataFrame.
+    The pandas DataFrame will have the same number of rows as the number of 
+    high-resolution pixels in the combined DataArrays.
     
     Parameters
     ----------
@@ -367,8 +278,8 @@ year_range = range(1980, 2015)
 var = 'precip'
 unit = 'mm/day'
 var_scale = 86400
-project_width = 500 # number of sub-grid pixels to project high-res data onto
-project_height = 500
+project_width = 100 # number of sub-grid pixels to project high-res data onto
+project_height = 100
 use_multiprocessing = True
 num_threads = os.cpu_count()
 mdata_paths = ['/archive/m2p/awg/2023.04_orog_disag/'
@@ -385,16 +296,18 @@ ptile_data = load_ptile_data(cube_face)
 grid_xt_range = range(1, 25)
 grid_yt_range = range(15, 80)
 locstrs = create_locstrs(cube_face, grid_xt_range, grid_yt_range)
-
+# Load and reprojectthe tid data
+tid_hr_data_list = get_tid_hr_data_for_locstrs(
+    locstrs, num_threads=num_threads, use_multiprocessing=use_multiprocessing,
+    project_width=project_width, project_height=project_height)
+#%%
 # Prepare lists of high-res data for each cell
-mdata_loc_hr_list, tid_hr_data_list = \
-    get_mdata_hr_for_loc_ranges(
-        mdata, ptile_data, locstrs, 
-        use_multiprocessing=use_multiprocessing, num_threads=num_threads,
-        project_width=project_width, project_height=project_height)
+mdata_loc_hr_list = \
+    map_mdata_to_tid_hr_list(
+        mdata, ptile_data, tid_hr_data_list, locstrs)
 #%%
 # Prepare lists of high-res DEM elevation data for each cell
-dem_data_hr_list = get_dem_terrain_data_for_loc_ranges(
+dem_data_hr_list = get_dem_terrain_data_for_locstrs(
     locstrs, num_threads=num_threads, use_multiprocessing=use_multiprocessing,
     project_width=project_width, project_height=project_height)
 #%%

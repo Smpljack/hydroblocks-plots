@@ -4,6 +4,10 @@ import numpy as np
 import rasterio
 from rasterio.warp import reproject
 import h5py
+import tqdm
+from tqdm.contrib.concurrent import thread_map
+import os
+
 
 def load_ptile_data(cube_face):
     """
@@ -22,34 +26,6 @@ def load_ptile_data(cube_face):
     ptile_filename = f'/archive/Marc.Prange/ptiles/ptiles.face{cube_face}.h5'
     ptile_file = h5py.File(ptile_filename, 'r')
     return ptile_file
-
-def load_hr_latlon_data(locstr):
-    """
-    Load the high-resolution lat/lon data for a given location.
-    
-    Parameters
-    ----------
-    locstr : str
-        The location string.
-    
-    Returns
-    -------
-    lon_hr : np.ndarray
-        The high-resolution longitude data.
-    lat_hr : np.ndarray
-        The high-resolution latitude data.
-    """
-    latlon_path = ('/archive/Rui.Wang/lightning_test_20250422/'
-                  f'{locstr}/mask_latlon.tif')
-    with rasterio.open(latlon_path) as src:
-        x = np.arange(0, src.width)
-        y = np.arange(0, src.height)
-        xx, yy = np.meshgrid(x, y)
-        lon_hr, lat_hr = rasterio.transform.xy(src.transform, yy, xx)
-        lon_hr = np.array(lon_hr)
-        lat_hr = np.array(lat_hr)
-    return lon_hr, lat_hr
-
 
 def reproject_data(src, project_width=None, project_height=None):
     """
@@ -110,6 +86,23 @@ def reproject_data(src, project_width=None, project_height=None):
     transform = new_transform
     return data, width, height, transform
 
+def load_tid_hr_data_mp(args):
+    """
+    Wrapper for load_tid_hr_data to be used with multiprocessing.
+
+    Parameters
+    ----------
+    args : tuple
+        The location string, project width, and project height.
+
+    Returns
+    -------
+    tid_hr_data_da : xarray.DataArray
+        The high-resolution tile ID data with lon/lat coordinates.
+    """
+    locstr, project_width, project_height = args
+    return load_tid_hr_data(locstr, project_width, project_height)
+
 def load_tid_hr_data(locstr, project_width=None, project_height=None):
     """
     Load the high-resolution tile ID data for a given location.
@@ -119,9 +112,9 @@ def load_tid_hr_data(locstr, project_width=None, project_height=None):
     locstr : str
         The location string.
     project_width : int, optional
-        If provided, reproject the data to this width using nearest neighbor resampling.
+        The width of the projected raster.
     project_height : int, optional
-        If provided, reproject the data to this height using nearest neighbor resampling.
+        The height of the projected raster.
     
     Returns
     -------
@@ -159,25 +152,46 @@ def load_tid_hr_data(locstr, project_width=None, project_height=None):
     )
     return tid_hr_data_da
 
-def get_loc_ptile_data(ptile_data, locstr):
+def get_tid_hr_data_for_locstrs(
+        locstrs, num_threads=None, use_multiprocessing=True,
+        project_width=None, project_height=None):
     """
-    Get the ptile data for a given location.
-    
+    Wrapper for loading the high-resolution tile ID data for multiple locations.
+
     Parameters
     ----------
-    ptile_data : xarray.Dataset
-        The ptile data.
-    locstr : str
-        The location string.
+    locstrs : list
+        The location strings.
+    num_threads : int, optional
+        The number of threads to use.
+    use_multiprocessing : bool, optional
+        Whether to use multiprocessing.
+    project_width : int, optional
+        The width of the projected raster.
+    project_height : int, optional
+        The height of the projected raster.
     
     Returns
     -------
-    ptile_data_loc : xarray.Dataset
-        The ptile data for the given location.
+    tid_hr_data_list : list
+        The high-resolution tile ID data for each location.
     """
-    return ptile_data[locstr]
+    # Create argument tuples for each grid cell
+    args_list = [(locstr, project_width, project_height) for locstr in locstrs]
+    if use_multiprocessing:
+        if num_threads is None:
+            num_threads = os.cpu_count()
+        # Process grid cells in parallel
+        results = thread_map(
+            load_tid_hr_data_mp, args_list, max_workers=num_threads)
+    else:
+        # Process grid cells sequentially
+        results = []
+        for args in tqdm.tqdm(args_list, desc="Processing tiles"):
+            results.append(load_tid_hr_data(*args))
+    return results
 
-def get_mdata_loc_hr(mdata_loc, soil_tiles, tid_hr_data_loc):
+def map_mdata_to_tid_hr_for_loc(mdata_loc, soil_tiles, tid_hr_data_loc):
     """
     Map out the model data to the high-resolution tile ID data.
     
@@ -207,20 +221,78 @@ def get_mdata_loc_hr(mdata_loc, soil_tiles, tid_hr_data_loc):
     )
     return mdata_loc_hr_da
 
-def read_dem_terrain_data(args):
+def map_mdata_to_tid_hr_list(mdata, ptile_data, tid_hr_data_list, locstrs):
     """
-    Read the high-resolution DEM/terrain data for a given location.
+    Map out the model data to the high-resolution tile ID data given a list of
+    high-resolution tile ID data and an mdata array.
     
     Parameters
     ----------
+    mdata : xarray.DataArray
+        Input data array
+    ptile_data : h5py.File
+        Ptiles data
+    locstrs : list
+        List of location strings
+    project_width : int, optional
+        Width of the projected grid.
+    project_height : int, optional
+        Height of the projected grid.
+    
+    Returns
+    -------
+    list
+        List of high-resolution data arrays
+    """
+    # Create argument tuples for each grid cell
+    args_list = [(
+        mdata.sel(grid_xt=int(locstr.split(',')[2].split(':')[1]), 
+                  grid_yt=int(locstr.split(',')[1].split(':')[1])), 
+        ptile_data['grid_data'][locstr]['soil/tile'][()],
+        tid_hr_data_list[locstrs.index(locstr)]) 
+        for locstr in locstrs 
+        if 'soil/tile' in ptile_data['grid_data'][locstr].keys()]
+    results = []
+    for args in tqdm.tqdm(args_list, desc="Processing tiles"):
+        results.append(map_mdata_to_tid_hr_for_loc(*args))
+    
+    return results
+
+def read_dem_terrain_data_mp(args):
+    """
+    Wrapper for read_dem_terrain_data to be used with multiprocessing.
+
+    Parameters
+    ----------
     args : tuple
-        Tuple containing (locstr, project_width, project_height)
+        The location string, project width, and project height.
+    
     Returns
     -------
     dem_data_da : xarray.DataArray
         The high-resolution DEM/terrain data.
     """
     locstr, project_width, project_height = args
+    return read_dem_terrain_data(locstr, project_width, project_height)
+
+def read_dem_terrain_data(locstr, project_width=None, project_height=None):
+    """
+    Read the high-resolution DEM/terrain data for a given location.
+    
+    Parameters
+    ----------
+    locstr : str
+        The location string.
+    project_width : int, optional
+        The width of the projected raster.
+    project_height : int, optional
+        The height of the projected raster.
+    
+    Returns
+    -------
+    dem_data_da : xarray.DataArray
+        The high-resolution DEM/terrain data.
+    """
     dem_filename = ('/archive/Rui.Wang/lightning_test_20250422/'
                     f'{locstr}/dem_latlon.tif')
     with rasterio.open(dem_filename) as src:
@@ -249,71 +321,35 @@ def read_dem_terrain_data(args):
     )
     return dem_data_da
 
-def get_mdata_hr_for_loc(
-        mdata_loc, locstr, return_tid_hr_data=True, soil_tiles=None,
+def get_dem_terrain_data_for_locstrs(
+        locstrs, num_threads=None, use_multiprocessing=True,
         project_width=None, project_height=None):
     """
-    Get the high-resolution model data for a given location.
+    Wrapper for loading the DEM/terrain data for multiple locations.
     
     Parameters
     ----------
-    mdata_loc : xarray.DataArray
-        The model data.
-    locstr : str
-        The location string.
-    return_tid_hr_data : bool, optional
-        Whether to return the high-resolution tile ID data.
-    soil_tiles : list, optional
-        The soil tiles.
+    locstrs : list
+        List of location strings
+    num_threads : int, optional
+        Number of threads to use. If None, uses cpu_count() - 1
+    use_multiprocessing : bool, optional
+        Whether to use multiprocessing. If False, processes sequentially.
     project_width : int, optional
         Width of the projected grid.
     project_height : int, optional
         Height of the projected grid.
-
-    Returns
-    -------
-    tuple
-        Returns (mdata_loc_hr_da, tid_hr_data_da) 
-        if return_tid_hr_data is True, otherwise returns mdata_loc_hr_da.
     """
-    # Get high-res lat/lon
-    # lon_hr, lat_hr = load_hr_latlon_data(locstr)
-    # Get high-res map of tile ID
-    tid_hr_da = load_tid_hr_data(locstr, project_width, project_height)
-    # Map out model data to high-res
-    mdata_loc_hr_da = get_mdata_loc_hr(mdata_loc, soil_tiles, tid_hr_da)
-    if return_tid_hr_data:
-        return mdata_loc_hr_da, tid_hr_da
+    args_list = [(locstr, project_width, project_height) for locstr in locstrs]
+    if use_multiprocessing:
+        if num_threads is None:
+            num_threads = os.cpu_count()
+        # Process grid cells in parallel
+        results = thread_map(
+            read_dem_terrain_data_mp, args_list, max_workers=num_threads)
     else:
-        return mdata_loc_hr_da
-
-def process_grid_cell(args):
-    """
-    Process a single grid cell. This function is designed to be called 
-    by multiprocessing.
-    
-    Parameters
-    ----------
-    args : tuple
-        Tuple containing (mdata, locstr, soil_tiles)
-    
-    Returns
-    -------
-    tuple or None
-        Returns (mdata_loc_hr, dem_data_hr, tid_hr_data) 
-        if successful, None if failed
-    """
-    try:
-        mdata, locstr, soil_tiles, project_width, project_height = args
-        i = int(locstr.split(',')[1].split(':')[1])
-        j = int(locstr.split(',')[2].split(':')[1])
-        mdata_loc = mdata.sel(grid_xt=j, grid_yt=i)
-        mdata_loc_hr_da, tid_hr_da = get_mdata_hr_for_loc(
-            mdata_loc, locstr, return_tid_hr_data=True, 
-            soil_tiles=soil_tiles, project_width=project_width, 
-            project_height=project_height)
-        # dem_data_hr = read_dem_terrain_data(locstr)
-        return mdata_loc_hr_da, tid_hr_da
-    except Exception as e:
-        print(f"Error processing {locstr}: {str(e)}", flush=True)
-        return None
+        # Process grid cells sequentially
+        results = []
+        for args in tqdm.tqdm(args_list, desc="Processing tiles"):
+            results.append(read_dem_terrain_data(*args))
+    return results
