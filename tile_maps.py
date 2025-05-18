@@ -16,7 +16,7 @@ from process_utils import (get_dem_terrain_data_for_locstrs,
                            load_ptile_data, get_tid_hr_data_for_locstrs,
                            map_mdata_to_tid_hr_list)
 
-def create_locstrs(cube_face, grid_xt_range, grid_yt_range):
+def create_locstrs(cube_face, grid_xt, grid_yt):
     """
     Create a list of location strings for a given cube face and grid range.
     
@@ -24,9 +24,9 @@ def create_locstrs(cube_face, grid_xt_range, grid_yt_range):
     ----------
     cube_face : int
         The cube face number.
-    grid_xt_range : range
+    grid_xt : numpy array
         The range of x coordinates.
-    grid_yt_range : range
+    grid_yt : numpy array
         The range of y coordinates.
     
     Returns
@@ -35,7 +35,7 @@ def create_locstrs(cube_face, grid_xt_range, grid_yt_range):
         A list of location strings.
     """
     locstrs = [f'tile:{cube_face},is:{i},js:{j}' 
-    for i in grid_yt_range for j in grid_xt_range 
+    for i, j in zip(grid_yt, grid_xt) 
     if os.path.exists(
         '/archive/Rui.Wang/lightning_test_20250422/'
         f'tile:{cube_face},is:{i},js:{j}')]
@@ -271,6 +271,43 @@ def combine_da_list_to_df(da_list):
     
     combined_df = pd.concat(dfs, ignore_index=True)
     return combined_df
+
+def get_grid_indices_in_range(mdata, lon_range, lat_range):
+    """
+    Find grid indices (grid_xt, grid_yt) for points within a specified lat/lon range.
+    
+    Parameters
+    ----------
+    mdata : xarray.Dataset or xarray.DataArray
+        Model data containing geolat_t and geolon_t coordinates
+    lon_range : tuple
+        Tuple of (min_lon, max_lon) in degrees
+    lat_range : tuple
+        Tuple of (min_lat, max_lat) in degrees
+    
+    Returns
+    -------
+    tuple
+        Two numpy arrays containing the grid_xt and grid_yt indices that fall within
+        the specified lat/lon range
+    """
+    # Get the lat/lon coordinates
+    lats = mdata.geolat_t
+    lons = mdata.geolon_t
+    
+    # Create masks for points within the ranges
+    lat_mask = (lats >= lat_range[0]) & (lats <= lat_range[1])
+    lon_mask = (lons >= lon_range[0]) & (lons <= lon_range[1])
+    
+    # Combine masks to find points within both ranges
+    combined_mask = lat_mask & lon_mask
+    
+    # Get the indices where the mask is True
+    grid_yt_indices, grid_xt_indices = np.where(combined_mask)
+    
+    # Add 1 to the indices to match the grid indices
+    return grid_xt_indices+1, grid_yt_indices+1
+
 #%%
 # Setup parameters
 cube_face = 5
@@ -293,9 +330,12 @@ mdata = xr.open_mfdataset(mdata_paths)[f'{var}'].mean('time').load()*var_scale
 ptile_data = load_ptile_data(cube_face)
 #%%
 # Select grid cells and create locstrs
-grid_xt_range = range(1, 25)
-grid_yt_range = range(15, 80)
-locstrs = create_locstrs(cube_face, grid_xt_range, grid_yt_range)
+conus_lat_range = (25, 50)
+conus_lon_range = (-125+360, -67+360)
+grid_xt, grid_yt = get_grid_indices_in_range(
+    mdata, conus_lon_range, conus_lat_range)
+locstrs = create_locstrs(cube_face, grid_xt, grid_yt)
+#%%
 # Load and reprojectthe tid data
 tid_hr_data_list = get_tid_hr_data_for_locstrs(
     locstrs, num_threads=num_threads, use_multiprocessing=use_multiprocessing,
