@@ -16,6 +16,7 @@ from process_utils import (get_dem_terrain_data_for_locstrs,
                            load_ptile_data, get_tid_hr_data_for_locstrs,
                            map_mdata_to_tid_hr_list)
 
+
 def create_locstrs(cube_face, grid_xt, grid_yt):
     """
     Create a list of location strings for a given cube face and grid range.
@@ -308,9 +309,60 @@ def get_grid_indices_in_range(mdata, lon_range, lat_range):
     # Add 1 to the indices to match the grid indices
     return grid_xt_indices+1, grid_yt_indices+1
 
+def cube_sphere_face_min_max_lon_lat(cube_face):
+    """
+    Get the minimum and maximum longitude and latitude for a given cube face.
+    """
+    if cube_face == 1:
+        return (0.8439675569534302, 359.8221130371094, -35.174068450927734, 44.26972579956055)
+    elif cube_face == 2:
+        return (35.39055252075195, 124.60938262939453, -35.53116989135742, 44.60742950439453)
+    elif cube_face == 3:
+        return (0.16366428136825562, 359.95452880859375, 36.0015983581543, 84.08895874023438)
+    elif cube_face == 4:
+        return (125.39061737060547, 204.6916046142578, -44.60742950439453, 40.94393539428711)
+    elif cube_face == 5:
+        return (235.32156372070312, 304.6094665527344, -41.65079116821289, 44.60742950439453)
+    elif cube_face == 6:
+        return (0.39228981733322144, 359.9735107421875, -89.26538848876953, -36.722476959228516)
+    else:
+        raise ValueError(f'Invalid cube face: {cube_face}')
+    
+def get_cube_faces_in_range(lon_range, lat_range):
+    """
+    Determine which cube sphere faces contain data within the given lat/lon ranges.
+    
+    Parameters
+    ----------
+    lon_range : tuple
+        Tuple of (min_lon, max_lon) in degrees
+    lat_range : tuple
+        Tuple of (min_lat, max_lat) in degrees
+    
+    Returns
+    -------
+    list
+        List of cube face numbers (1-6) that contain data within the specified ranges
+    """
+    # Initialize list to store relevant cube faces
+    relevant_faces = []
+    
+    # Check each cube face
+    for face in range(1, 7):
+        face_min_lon, face_max_lon, face_min_lat, face_max_lat = cube_sphere_face_min_max_lon_lat(face)
+        
+        # Check if there's any overlap between the ranges
+        lon_overlap = (lon_range[0] <= face_max_lon and lon_range[1] >= face_min_lon)
+        lat_overlap = (lat_range[0] <= face_max_lat and lat_range[1] >= face_min_lat)
+        
+        # If both longitude and latitude ranges overlap, add this face
+        if lon_overlap and lat_overlap:
+            relevant_faces.append(face)
+    
+    return relevant_faces
+
 #%%
 # Setup parameters
-cube_face = 5
 year_range = range(1980, 2015)
 var = 'precip'
 unit = 'mm/day'
@@ -319,42 +371,55 @@ project_width = 100 # number of sub-grid pixels to project high-res data onto
 project_height = 100
 use_multiprocessing = True
 num_threads = os.cpu_count()
-mdata_paths = ['/archive/m2p/awg/2023.04_orog_disag/'
-            'c96L33_am4p0_cmip6Diag_orog_disag/'
-            'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land_ptid/ts/'
-            f'monthly/1yr/land_ptid.{year}01-{year}12.{var}.tile{cube_face}.nc' 
-            for year in year_range]
-# Load the model data
-mdata = xr.open_mfdataset(mdata_paths)[f'{var}'].mean('time').load()*var_scale
-# Load the ptile data
-ptile_data = load_ptile_data(cube_face)
-#%%
 # Select grid cells and create locstrs
 conus_lat_range = (25, 50)
 conus_lon_range = (-125+360, -67+360)
-grid_xt, grid_yt = get_grid_indices_in_range(
-    mdata, conus_lon_range, conus_lat_range)
-locstrs = create_locstrs(cube_face, grid_xt, grid_yt)
+cube_faces = get_cube_faces_in_range(conus_lon_range, conus_lat_range)
+# Load the model data
+mdata_paths = {cube_face: ['/archive/m2p/awg/2023.04_orog_disag/'
+            'c96L33_am4p0_cmip6Diag_orog_disag/'
+            'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land_ptid/ts/'
+            f'monthly/1yr/land_ptid.{year}01-{year}12.{var}.tile{cube_face}.nc' 
+            for year in year_range] for cube_face in cube_faces}
+mdata = {cube_face: 
+         xr.open_mfdataset(mdata_paths[cube_face])[f'{var}'].mean('time').load()*var_scale 
+         for cube_face in cube_faces}
+grid_indices = {cube_face: get_grid_indices_in_range(
+    mdata[cube_face], conus_lon_range, conus_lat_range) for cube_face in cube_faces}
+# Remove cube faces for which no grid indices are found
+for cube_face in cube_faces:
+    if grid_indices[cube_face][0].size == 0:
+        print(f'No grid indices found for cube face {cube_face}')
+        cube_faces.remove(cube_face)
+        del mdata[cube_face]
+        del grid_indices[cube_face]
+locstrs = {cube_face: create_locstrs(
+    cube_face, grid_indices[cube_face][0], grid_indices[cube_face][1]) 
+    for cube_face in cube_faces}
+# Load the ptile data
+ptile_data = {cube_face: load_ptile_data(cube_face) for cube_face in cube_faces}
+#%%
+
 #%%
 # Load and reprojectthe tid data
-tid_hr_data_list = get_tid_hr_data_for_locstrs(
-    locstrs, num_threads=num_threads, use_multiprocessing=use_multiprocessing,
-    project_width=project_width, project_height=project_height)
+tid_hr_data_list = {cube_face: get_tid_hr_data_for_locstrs(
+    locstrs[cube_face], num_threads=num_threads, use_multiprocessing=use_multiprocessing,
+    project_width=project_width, project_height=project_height) for cube_face in cube_faces}
 #%%
 # Prepare lists of high-res data for each cell
-mdata_loc_hr_list = \
-    map_mdata_to_tid_hr_list(
-        mdata, ptile_data, tid_hr_data_list, locstrs)
+mdata_loc_hr_list = {cube_face: map_mdata_to_tid_hr_list(
+    mdata[cube_face], ptile_data[cube_face], tid_hr_data_list[cube_face], locstrs[cube_face]) 
+    for cube_face in cube_faces}
 #%%
 # Prepare lists of high-res DEM elevation data for each cell
-dem_data_hr_list = get_dem_terrain_data_for_locstrs(
-    locstrs, num_threads=num_threads, use_multiprocessing=use_multiprocessing,
-    project_width=project_width, project_height=project_height)
+dem_data_hr_list = {cube_face: get_dem_terrain_data_for_locstrs(
+    locstrs[cube_face], num_threads=num_threads, use_multiprocessing=use_multiprocessing,
+    project_width=project_width, project_height=project_height) for cube_face in cube_faces}
 #%%
 # Combine the data into dataframes (1D, HR pixel-by-pixel)
-mdata_df = combine_da_list_to_df(mdata_loc_hr_list)
-dem_data_df = combine_da_list_to_df(dem_data_hr_list)
-tid_data_df = combine_da_list_to_df(tid_hr_data_list)
+mdata_df = pd.concat([combine_da_list_to_df(mdata_loc_hr_list[cube_face]) for cube_face in cube_faces], ignore_index=True)
+dem_data_df = pd.concat([combine_da_list_to_df(dem_data_hr_list[cube_face]) for cube_face in cube_faces], ignore_index=True)
+tid_data_df = pd.concat([combine_da_list_to_df(tid_hr_data_list[cube_face]) for cube_face in cube_faces], ignore_index=True)
 #%%
 # Create datashader maps
 plot1 = create_datashader_map(
