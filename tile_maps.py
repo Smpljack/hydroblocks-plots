@@ -362,8 +362,18 @@ def get_cube_faces_in_range(lon_range, lat_range):
     return relevant_faces
 
 #%%
+# Base directories
+base_paths = {
+    'mdata': '/archive/m2p/awg/2023.04_orog_disag/'
+             'c96L33_am4p0_cmip6Diag_orog_disag/'
+             'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land_ptid/ts/'
+             'monthly/1yr/',
+    'ptile': '/archive/Marc.Prange/ptiles/',
+    'tid': '/archive/Rui.Wang/lightning_test_20250422/',
+    'dem': '/archive/Rui.Wang/lightning_test_20250422/'
+}
 # Setup parameters
-year_range = range(1980, 2015)
+year_range = range(1980, 1982)
 var = 'precip'
 unit = 'mm/day'
 var_scale = 86400
@@ -376,10 +386,8 @@ conus_lat_range = (25, 50)
 conus_lon_range = (-125+360, -67+360)
 cube_faces = get_cube_faces_in_range(conus_lon_range, conus_lat_range)
 # Load the model data
-mdata_paths = {cube_face: ['/archive/m2p/awg/2023.04_orog_disag/'
-            'c96L33_am4p0_cmip6Diag_orog_disag/'
-            'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land_ptid/ts/'
-            f'monthly/1yr/land_ptid.{year}01-{year}12.{var}.tile{cube_face}.nc' 
+mdata_paths = {cube_face: [os.path.join(base_paths['mdata'],
+            f'land_ptid.{year}01-{year}12.{var}.tile{cube_face}.nc') 
             for year in year_range] for cube_face in cube_faces}
 mdata = {cube_face: 
          xr.open_mfdataset(mdata_paths[cube_face])[f'{var}'].mean('time').load()*var_scale 
@@ -397,13 +405,13 @@ locstrs = {cube_face: create_locstrs(
     cube_face, grid_indices[cube_face][0], grid_indices[cube_face][1]) 
     for cube_face in cube_faces}
 # Load the ptile data
-ptile_data = {cube_face: load_ptile_data(cube_face) for cube_face in cube_faces}
+ptile_data = {cube_face: load_ptile_data(cube_face, base_paths['ptile']) for cube_face in cube_faces}
 #%%
 
 #%%
 # Load and reprojectthe tid data
 tid_hr_data_list = {cube_face: get_tid_hr_data_for_locstrs(
-    locstrs[cube_face], num_threads=num_threads, use_multiprocessing=use_multiprocessing,
+    locstrs[cube_face], base_paths['tid'], num_threads=num_threads, use_multiprocessing=use_multiprocessing,
     project_width=project_width, project_height=project_height) for cube_face in cube_faces}
 #%%
 # Prepare lists of high-res data for each cell
@@ -413,7 +421,7 @@ mdata_loc_hr_list = {cube_face: map_mdata_to_tid_hr_list(
 #%%
 # Prepare lists of high-res DEM elevation data for each cell
 dem_data_hr_list = {cube_face: get_dem_terrain_data_for_locstrs(
-    locstrs[cube_face], num_threads=num_threads, use_multiprocessing=use_multiprocessing,
+    locstrs[cube_face], base_paths['dem'], num_threads=num_threads, use_multiprocessing=use_multiprocessing,
     project_width=project_width, project_height=project_height) for cube_face in cube_faces}
 #%%
 # Combine the data into dataframes (1D, HR pixel-by-pixel)

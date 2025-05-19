@@ -9,7 +9,7 @@ from tqdm.contrib.concurrent import thread_map
 import os
 
 
-def load_ptile_data(cube_face):
+def load_ptile_data(cube_face, base_path):
     """
     Load the ptiles data for a given cube face.
     
@@ -23,7 +23,7 @@ def load_ptile_data(cube_face):
     h5py.File
         The ptiles data.
     """
-    ptile_filename = f'/archive/Marc.Prange/ptiles/ptiles.face{cube_face}.h5'
+    ptile_filename = os.path.join(base_path, f'ptiles.face{cube_face}.h5')
     ptile_file = h5py.File(ptile_filename, 'r')
     return ptile_file
 
@@ -100,10 +100,10 @@ def load_tid_hr_data_mp(args):
     tid_hr_data_da : xarray.DataArray
         The high-resolution tile ID data with lon/lat coordinates.
     """
-    locstr, project_width, project_height = args
-    return load_tid_hr_data(locstr, project_width, project_height)
+    locstr, project_width, project_height, base_path = args
+    return load_tid_hr_data(locstr, project_width, project_height, base_path)
 
-def load_tid_hr_data(locstr, project_width=None, project_height=None):
+def load_tid_hr_data(locstr, base_path, project_width=None, project_height=None):
     """
     Load the high-resolution tile ID data for a given location.
     
@@ -111,6 +111,8 @@ def load_tid_hr_data(locstr, project_width=None, project_height=None):
     ----------
     locstr : str
         The location string.
+    base_path : str
+        The base path to the tile ID data.
     project_width : int, optional
         The width of the projected raster.
     project_height : int, optional
@@ -121,8 +123,7 @@ def load_tid_hr_data(locstr, project_width=None, project_height=None):
     tid_hr_data_da : xarray.DataArray
         The high-resolution tile ID data with lon/lat coordinates.
     """
-    tid_filename = ('/archive/Rui.Wang/lightning_test_20250422/'
-                    f'{locstr}/tiles.tif')
+    tid_filename = os.path.join(base_path, f'{locstr}/tiles.tif')
     with rasterio.open(tid_filename) as src:
         # Reproject the data if requested
         if project_width is not None and project_height is not None:
@@ -153,7 +154,7 @@ def load_tid_hr_data(locstr, project_width=None, project_height=None):
     return tid_hr_data_da
 
 def get_tid_hr_data_for_locstrs(
-        locstrs, num_threads=None, use_multiprocessing=True,
+        locstrs, base_path, num_threads=None, use_multiprocessing=True,
         project_width=None, project_height=None):
     """
     Wrapper for loading the high-resolution tile ID data for multiple locations.
@@ -162,6 +163,8 @@ def get_tid_hr_data_for_locstrs(
     ----------
     locstrs : list
         The location strings.
+    base_path : str
+        The base path to the tile ID data.
     num_threads : int, optional
         The number of threads to use.
     use_multiprocessing : bool, optional
@@ -177,7 +180,8 @@ def get_tid_hr_data_for_locstrs(
         The high-resolution tile ID data for each location.
     """
     # Create argument tuples for each grid cell
-    args_list = [(locstr, project_width, project_height) for locstr in locstrs]
+    args_list = [(locstr, base_path, project_width, project_height) 
+                 for locstr in locstrs]
     if use_multiprocessing:
         if num_threads is None:
             num_threads = os.cpu_count()
@@ -272,10 +276,10 @@ def read_dem_terrain_data_mp(args):
     dem_data_da : xarray.DataArray
         The high-resolution DEM/terrain data.
     """
-    locstr, project_width, project_height = args
-    return read_dem_terrain_data(locstr, project_width, project_height)
+    locstr, base_path, project_width, project_height = args
+    return read_dem_terrain_data(locstr, base_path, project_width, project_height)
 
-def read_dem_terrain_data(locstr, project_width=None, project_height=None):
+def read_dem_terrain_data(locstr, base_path, project_width=None, project_height=None):
     """
     Read the high-resolution DEM/terrain data for a given location.
     
@@ -283,6 +287,8 @@ def read_dem_terrain_data(locstr, project_width=None, project_height=None):
     ----------
     locstr : str
         The location string.
+    base_path : str
+        The base path to the DEM/terrain data.
     project_width : int, optional
         The width of the projected raster.
     project_height : int, optional
@@ -293,8 +299,7 @@ def read_dem_terrain_data(locstr, project_width=None, project_height=None):
     dem_data_da : xarray.DataArray
         The high-resolution DEM/terrain data.
     """
-    dem_filename = ('/archive/Rui.Wang/lightning_test_20250422/'
-                    f'{locstr}/dem_latlon.tif')
+    dem_filename = os.path.join(base_path, f'{locstr}/dem_latlon.tif')
     with rasterio.open(dem_filename) as src:
         if project_width is not None and project_height is not None:
             dem_data_array, width, height, transform = reproject_data(
@@ -322,7 +327,7 @@ def read_dem_terrain_data(locstr, project_width=None, project_height=None):
     return dem_data_da
 
 def get_dem_terrain_data_for_locstrs(
-        locstrs, num_threads=None, use_multiprocessing=True,
+        locstrs, base_path, num_threads=None, use_multiprocessing=True,
         project_width=None, project_height=None):
     """
     Wrapper for loading the DEM/terrain data for multiple locations.
@@ -331,6 +336,8 @@ def get_dem_terrain_data_for_locstrs(
     ----------
     locstrs : list
         List of location strings
+    base_path : str
+        The base path to the DEM/terrain data.
     num_threads : int, optional
         Number of threads to use. If None, uses cpu_count() - 1
     use_multiprocessing : bool, optional
@@ -340,7 +347,8 @@ def get_dem_terrain_data_for_locstrs(
     project_height : int, optional
         Height of the projected grid.
     """
-    args_list = [(locstr, project_width, project_height) for locstr in locstrs]
+    args_list = [(locstr, base_path, project_width, project_height) 
+                 for locstr in locstrs]
     if use_multiprocessing:
         if num_threads is None:
             num_threads = os.cpu_count()
