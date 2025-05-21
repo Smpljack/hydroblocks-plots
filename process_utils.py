@@ -54,7 +54,11 @@ def get_grid_indices_in_range(mdata, lon_range, lat_range):
     
     # Create masks for points within the ranges
     lat_mask = (lats >= lat_range[0]) & (lats <= lat_range[1])
-    lon_mask = (lons >= lon_range[0]) & (lons <= lon_range[1])
+    if lon_range[0] < lon_range[1]:
+        lon_mask = (lons >= lon_range[0]) & (lons <= lon_range[1])
+    else:
+        lon_mask = (lons >= lon_range[0]) & (lons <= 360)
+        lon_mask |= (lons >= 0) & (lons <= lon_range[1])
     
     # Combine masks to find points within both ranges
     combined_mask = lat_mask & lon_mask
@@ -111,8 +115,13 @@ def get_cube_faces_in_range(lon_range, lat_range):
             cube_sphere_face_min_max_lon_lat(face)
         
         # Check if there's any overlap between the ranges
-        lon_overlap = (lon_range[0] <= face_max_lon and 
-                       lon_range[1] >= face_min_lon)
+        if lon_range[0] < lon_range[1]:
+            lon_overlap = (lon_range[0] <= face_max_lon and 
+                           lon_range[1] >= face_min_lon)
+        else:
+            lon_overlap = ((lon_range[0] <= face_max_lon) or 
+                           (lon_range[1] >= face_min_lon))
+        
         lat_overlap = (lat_range[0] <= face_max_lat and 
                        lat_range[1] >= face_min_lat)
         

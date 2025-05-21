@@ -250,7 +250,6 @@ base_paths_ctrl = {
 year_range = range(1980, 1990)
 vars = ['precip', 'Tgrnd']
 units = ['mm/day', 'K']
-load_tile_elevation = True
 project_width = 100 # number of sub-grid pixels to project high-res data onto
 project_height = 100
 use_multiprocessing = True
@@ -258,17 +257,19 @@ num_threads = os.cpu_count()
 # Select grid cells and create locstrs
 conus_lat_range = (25, 50)
 conus_lon_range = (-125+360, -67+360)
+europe_lat_range = (35, 70)
+europe_lon_range = (350, 35)
 #%%
 mdata_df_disag = load_hr_mdata(
-    conus_lon_range, conus_lat_range, year_range, vars, base_paths_disag,
+    europe_lon_range, europe_lat_range, year_range, vars, base_paths_disag,
     project_width=project_width, project_height=project_height, 
     use_multiprocessing=use_multiprocessing, num_threads=num_threads,
-    add_tile_elevation=load_tile_elevation)
+    add_tile_elevation=False)
 mdata_df_ctrl = load_hr_mdata(
-    conus_lon_range, conus_lat_range, year_range, vars, base_paths_ctrl,
+    europe_lon_range, europe_lat_range, year_range, vars, base_paths_ctrl,
     project_width=project_width, project_height=project_height, 
     use_multiprocessing=use_multiprocessing, num_threads=num_threads,
-    add_tile_elevation=load_tile_elevation)
+    add_tile_elevation=True)
 #%%
 # Create datashader maps
 plot1 = create_datashader_map(
@@ -285,7 +286,7 @@ precip_diff = mdata_df_disag.copy()
 precip_diff['precip'] = mdata_df_disag['precip'] - mdata_df_ctrl['precip']
 plot3 = create_datashader_map(
     precip_diff, variable='precip', unit='mm/day', var_scale=86400,
-    title='$\Delta$precip (disag - ctrl)', resolution=1, show_borders=True,
+    title='precip (disag - ctrl)', resolution=1, show_borders=True,
     cmap=all_palettes['RdBu'][11], agg_func='mean',
     vmin=-2, vmax=2, shared_figure=plot1)
 plot4 = create_datashader_map(
