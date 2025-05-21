@@ -7,7 +7,254 @@ import h5py
 import tqdm
 from tqdm.contrib.concurrent import thread_map
 import os
+from scipy.spatial import cKDTree
+import pandas as pd
 
+
+def combine_ds_list_to_df(ds_list):
+    """
+    Combine a list of DataSets into a single pandas DataFrame.
+    The pandas DataFrame will have the same number of rows as the number of 
+    high-resolution pixels in the combined DataFrames of the Dataset.
+    Each variable in the Dataset will be a column in the DataFrame.
+    """
+    if not ds_list:
+        raise ValueError("ds_list cannot be empty")
+    
+    # Combine all DataFrames into a single DataFrame
+    dfs = []
+    for ds in ds_list:
+        dfs.append(ds.to_dataframe().reset_index())
+    combined_df = pd.concat(dfs, ignore_index=True)
+    return combined_df
+
+def get_grid_indices_in_range(mdata, lon_range, lat_range):
+    """
+    Find grid indices (grid_xt, grid_yt) for points within a 
+    specified lat/lon range.
+    
+    Parameters
+    ----------
+    mdata : xarray.Dataset or xarray.DataArray
+        Model data containing geolat_t and geolon_t coordinates
+    lon_range : tuple
+        Tuple of (min_lon, max_lon) in degrees
+    lat_range : tuple
+        Tuple of (min_lat, max_lat) in degrees
+    
+    Returns
+    -------
+    tuple
+        Two numpy arrays containing the grid_xt and grid_yt indices that fall 
+        within the specified lat/lon range.
+    """
+    # Get the lat/lon coordinates
+    lats = mdata.geolat_t
+    lons = mdata.geolon_t
+    
+    # Create masks for points within the ranges
+    lat_mask = (lats >= lat_range[0]) & (lats <= lat_range[1])
+    lon_mask = (lons >= lon_range[0]) & (lons <= lon_range[1])
+    
+    # Combine masks to find points within both ranges
+    combined_mask = lat_mask & lon_mask
+    
+    # Get the indices where the mask is True
+    grid_yt_indices, grid_xt_indices = np.where(combined_mask)
+    
+    # Add 1 to the indices to match the grid indices
+    return grid_xt_indices+1, grid_yt_indices+1
+
+def cube_sphere_face_min_max_lon_lat(cube_face):
+    """
+    Get the minimum and maximum longitude and latitude for a given cube face.
+    """
+    if cube_face == 1:
+        return (0.8439675569534302, 359.8221130371094, -35.174068450927734, 44.26972579956055)
+    elif cube_face == 2:
+        return (35.39055252075195, 124.60938262939453, -35.53116989135742, 44.60742950439453)
+    elif cube_face == 3:
+        return (0.16366428136825562, 359.95452880859375, 36.0015983581543, 84.08895874023438)
+    elif cube_face == 4:
+        return (125.39061737060547, 204.6916046142578, -44.60742950439453, 40.94393539428711)
+    elif cube_face == 5:
+        return (235.32156372070312, 304.6094665527344, -41.65079116821289, 44.60742950439453)
+    elif cube_face == 6:
+        return (0.39228981733322144, 359.9735107421875, -89.26538848876953, -36.722476959228516)
+    else:
+        raise ValueError(f'Invalid cube face: {cube_face}')
+    
+def get_cube_faces_in_range(lon_range, lat_range):
+    """
+    Determine which cube sphere faces contain data within the given 
+    lat/lon ranges.
+    
+    Parameters
+    ----------
+    lon_range : tuple
+        Tuple of (min_lon, max_lon) in degrees
+    lat_range : tuple
+        Tuple of (min_lat, max_lat) in degrees
+    
+    Returns
+    -------
+    list
+        List of cube face numbers (1-6) that contain data within the 
+        specified ranges.
+    """
+    # Initialize list to store relevant cube faces
+    relevant_faces = []
+    
+    # Check each cube face
+    for face in range(1, 7):
+        face_min_lon, face_max_lon, face_min_lat, face_max_lat = \
+            cube_sphere_face_min_max_lon_lat(face)
+        
+        # Check if there's any overlap between the ranges
+        lon_overlap = (lon_range[0] <= face_max_lon and 
+                       lon_range[1] >= face_min_lon)
+        lat_overlap = (lat_range[0] <= face_max_lat and 
+                       lat_range[1] >= face_min_lat)
+        
+        # If both longitude and latitude ranges overlap, add this face
+        if lon_overlap and lat_overlap:
+            relevant_faces.append(face)
+    
+    return relevant_faces
+
+def load_hr_mdata(lon_range, lat_range, year_range, vars, base_paths,
+                  project_width=100, project_height=100, 
+                  use_multiprocessing=True, num_threads=os.cpu_count(),
+                  add_tile_elevation=False):
+    """
+    Load high-resolution model data for a given lat/lon range and year range.
+    
+    Parameters
+    ----------
+    lon_range : tuple
+        Tuple of (min_lon, max_lon) in degrees
+    lat_range : tuple
+        Tuple of (min_lat, max_lat) in degrees
+    year_range : tuple
+        Tuple of (min_year, max_year)
+    vars : list
+        List of variables to load
+    base_paths : dict
+        Dictionary of base paths with keys 'mdata', 'ptile', 'tid', and 'dem'
+    project_width : int, optional
+        The width of the projected grid.
+    project_height : int, optional
+        The height of the projected grid.
+    use_multiprocessing : bool, optional
+        Whether to use multiprocessing.
+    num_threads : int, optional
+        The number of threads to use.
+    add_tile_elevation : bool, optional
+        Whether to interpolate DEM elevation data to the model data grid.
+    
+    Returns
+    -------
+    pandas.DataFrame
+        A DataFrame containing the model data.
+    """
+    print(
+        'Loading model data for:\n'
+        f'lon_range: {lon_range}\n'
+        f'lat_range: {lat_range}\n'
+        f'year_range: {year_range}\n'
+        f'vars: {vars}')
+    cube_faces = get_cube_faces_in_range(lon_range, lat_range)
+    print(f'Considering cube faces {cube_faces}')
+    # Load the model data
+    mdata_paths = {cube_face: [os.path.join(base_paths['mdata'],
+                f'land_ptid.{year}01-{year}12.{var}.tile{cube_face}.nc') 
+                for year in year_range for var in vars] 
+                for cube_face in cube_faces}
+    print(f'Loading model data...')
+    mdata = {cube_face: 
+            xr.open_mfdataset(mdata_paths[cube_face]).mean('time').load()
+            for cube_face in cube_faces}
+    print(f'Getting cubic-sphere grid indices for region of interest...')
+    grid_indices = {cube_face: get_grid_indices_in_range(
+        mdata[cube_face], lon_range, lat_range) for cube_face in cube_faces}
+    # Remove cube faces for which no grid indices are found
+    for cube_face in cube_faces:
+        if grid_indices[cube_face][0].size == 0:
+            print(f'No grid indices found for cube face {cube_face}')
+            cube_faces.remove(cube_face)
+            del mdata[cube_face]
+            del grid_indices[cube_face]
+    print(f'Finding grid indices with existing high-resolution tile data...')
+    locstrs = {cube_face: create_locstrs(
+        cube_face, grid_indices[cube_face][0], grid_indices[cube_face][1]) 
+        for cube_face in cube_faces}
+    print(f'Loading ptiles data...')
+    ptile_data = {cube_face: load_ptile_data(cube_face, base_paths['ptile']) 
+                  for cube_face in cube_faces}
+    print(f'Loading high-resolution tile ID data for each cube face...')
+    tid_hr_data_list = {cube_face: get_tid_hr_data_for_locstrs(
+        locstrs[cube_face], base_paths['tid'], num_threads=num_threads, 
+        use_multiprocessing=use_multiprocessing,
+        project_width=project_width, project_height=project_height)
+        for cube_face in cube_faces}
+    print(f'Mapping model data to high-resolution tile ID data for each cube face...')
+    mdata_loc_hr_list = {cube_face: map_mdata_to_tid_hr_list(
+        mdata[cube_face], ptile_data[cube_face], tid_hr_data_list[cube_face], 
+        locstrs[cube_face])
+        for cube_face in cube_faces}
+    print(f'Combining model data into a single DataFrame for each cube face...')
+    mdata_df = pd.concat(
+        [combine_ds_list_to_df(mdata_loc_hr_list[cube_face]) 
+         for cube_face in cube_faces], ignore_index=True)
+    tid_data_df = pd.concat(
+        [combine_ds_list_to_df(tid_hr_data_list[cube_face]) 
+         for cube_face in cube_faces], ignore_index=True)
+    mdata_df['tid'] = tid_data_df['tile ID']
+    if add_tile_elevation:
+        print(f'Loading DEM/terrain data for each cube face...')
+        dem_data_hr_list = {cube_face: get_dem_terrain_data_for_locstrs(
+            locstrs[cube_face], base_paths['dem'], num_threads=num_threads, 
+            use_multiprocessing=use_multiprocessing,
+            project_width=project_width, project_height=project_height) 
+            for cube_face in cube_faces}
+        dem_data_df = pd.concat(
+            [combine_ds_list_to_df(dem_data_hr_list[cube_face]) 
+             for cube_face in cube_faces], ignore_index=True)
+        print(f'Interpolating DEM/terrain data to model data grid...')
+        dem_points = np.column_stack((dem_data_df['lon'].values, dem_data_df['lat'].values))
+        dem_values = dem_data_df['elevation'].values
+        mdata_points = np.column_stack((mdata_df['lon'].values, mdata_df['lat'].values))
+        # Build KDTree and find nearest neighbors
+        tree = cKDTree(dem_points)
+        distances, indices = tree.query(mdata_points, k=1)
+        # Interpolate using nearest neighbor
+        mdata_df['elevation'] = dem_values[indices]
+    return mdata_df
+
+def create_locstrs(cube_face, grid_xt, grid_yt):
+    """
+    Create a list of location strings for a given cube face and grid range.
+    
+    Parameters
+    ----------
+    cube_face : int
+        The cube face number.
+    grid_xt : numpy array
+        The range of x coordinates.
+    grid_yt : numpy array
+        The range of y coordinates.
+    
+    Returns
+    -------
+    list
+        A list of location strings.
+    """
+    locstrs = [f'tile:{cube_face},is:{i},js:{j}' 
+    for i, j in zip(grid_yt, grid_xt) 
+    if os.path.exists(
+        '/archive/Rui.Wang/lightning_test_20250422/'
+        f'tile:{cube_face},is:{i},js:{j}')]
+    return locstrs
 
 def load_ptile_data(cube_face, base_path):
     """
@@ -103,7 +350,8 @@ def load_tid_hr_data_mp(args):
     locstr, project_width, project_height, base_path = args
     return load_tid_hr_data(locstr, project_width, project_height, base_path)
 
-def load_tid_hr_data(locstr, base_path, project_width=None, project_height=None):
+def load_tid_hr_data(
+        locstr, base_path, project_width=None, project_height=None):
     """
     Load the high-resolution tile ID data for a given location.
     
@@ -157,7 +405,8 @@ def get_tid_hr_data_for_locstrs(
         locstrs, base_path, num_threads=None, use_multiprocessing=True,
         project_width=None, project_height=None):
     """
-    Wrapper for loading the high-resolution tile ID data for multiple locations.
+    Wrapper for loading the high-resolution tile ID data for 
+    multiple locations.
 
     Parameters
     ----------
@@ -213,15 +462,21 @@ def map_mdata_to_tid_hr_for_loc(mdata_loc, soil_tiles, tid_hr_data_loc):
     mdata_loc_hr_da : xarray.DataArray
         The high-resolution model data.
     """
-    mdata_loc_hr = np.zeros_like(tid_hr_data_loc)*np.nan
-    for ti in soil_tiles:
-        mdata_loc_hr[tid_hr_data_loc==ti]=mdata_loc.data[ti]
-    mdata_loc_hr_da = xr.DataArray(
-        data=mdata_loc_hr,
+    variables = [var for var in mdata_loc.data_vars 
+                 if var not in ('average_DT')]
+    mdata_loc_hr = {var: np.zeros_like(tid_hr_data_loc)*np.nan 
+                    for var in variables}
+    for var in variables:
+        for ti in soil_tiles:
+            mdata_loc_hr[var] = np.where(
+                tid_hr_data_loc==ti, 
+                mdata_loc[var].isel(ptid=ti).values, 
+                mdata_loc_hr[var])
+    mdata_loc_hr_da = xr.Dataset(
+        data_vars={var: (('x', 'y'), mdata_loc_hr[var]) 
+                   for var in variables},
         coords={'lon': (('x', 'y'), tid_hr_data_loc.lon.data),
-                'lat': (('x', 'y'), tid_hr_data_loc.lat.data)},
-        dims=['x', 'y'],
-        name=mdata_loc.name
+                'lat': (('x', 'y'), tid_hr_data_loc.lat.data)}
     )
     return mdata_loc_hr_da
 
@@ -277,9 +532,11 @@ def read_dem_terrain_data_mp(args):
         The high-resolution DEM/terrain data.
     """
     locstr, base_path, project_width, project_height = args
-    return read_dem_terrain_data(locstr, base_path, project_width, project_height)
+    return read_dem_terrain_data(
+        locstr, base_path, project_width, project_height)
 
-def read_dem_terrain_data(locstr, base_path, project_width=None, project_height=None):
+def read_dem_terrain_data(
+        locstr, base_path, project_width=None, project_height=None):
     """
     Read the high-resolution DEM/terrain data for a given location.
     
@@ -317,12 +574,12 @@ def read_dem_terrain_data(locstr, base_path, project_width=None, project_height=
         demlon = np.array(demlon).reshape(height, width)
         demlat = np.array(demlat).reshape(height, width)
     
-    dem_data_da = xr.DataArray(
-        data=np.where(dem_data_array <= 0, np.nan, dem_data_array),
+    dem_data_da = xr.Dataset(
+        data_vars={'elevation': 
+                   (('x', 'y'), 
+                    np.where(dem_data_array <= 0, np.nan, dem_data_array))},
         coords={'lon': (('x', 'y'), demlon),
                 'lat': (('x', 'y'), demlat)},
-        dims=['x', 'y'],
-        name='elevation'
     )
     return dem_data_da
 

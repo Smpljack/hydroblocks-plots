@@ -6,46 +6,20 @@ from bokeh.models import HoverTool, ColorBar,BasicTicker
 from bokeh.palettes import all_palettes
 from bokeh.plotting import figure
 from bokeh.io import output_notebook, show, save
-from bokeh.layouts import row
+from bokeh.layouts import row, grid, gridplot
 output_notebook()
 import datashader as ds
 import pandas as pd
 import bokeh
 import os
-from process_utils import (get_dem_terrain_data_for_locstrs, 
-                           load_ptile_data, get_tid_hr_data_for_locstrs,
-                           map_mdata_to_tid_hr_list)
+from process_utils import load_hr_mdata
 
-
-def create_locstrs(cube_face, grid_xt, grid_yt):
-    """
-    Create a list of location strings for a given cube face and grid range.
-    
-    Parameters
-    ----------
-    cube_face : int
-        The cube face number.
-    grid_xt : numpy array
-        The range of x coordinates.
-    grid_yt : numpy array
-        The range of y coordinates.
-    
-    Returns
-    -------
-    list
-        A list of location strings.
-    """
-    locstrs = [f'tile:{cube_face},is:{i},js:{j}' 
-    for i, j in zip(grid_yt, grid_xt) 
-    if os.path.exists(
-        '/archive/Rui.Wang/lightning_test_20250422/'
-        f'tile:{cube_face},is:{i},js:{j}')]
-    return locstrs
 
 def create_datashader_map(
-        combined_df, title=None, unit=None, cmap=all_palettes['Viridis'][256], 
+        combined_df, variable=None, unit=None, var_scale=1, 
+        title=None, cmap=all_palettes['Viridis'][256], 
         width=800, height=600, resolution=1, show_borders=True, 
-        vmin=None, vmax=None, agg_func='mean'):
+        vmin=None, vmax=None, agg_func='mean', shared_figure=None):
     """
     Create a high-resolution map visualization using Datashader, 
     combining multiple DataArrays into a single plot.
@@ -54,10 +28,14 @@ def create_datashader_map(
     ----------
     combined_df : pandas.DataFrame
         DataFrame containing the combined data from multiple DataArrays.
-    title : str, optional
-        Title for the plot. If None, will use the first DataArray's name.
+    variable : str, optional
+        Variable to plot. If None, will use the first DataArray's name.
     unit : str, optional
         Unit for the color scale. If None, will not display the unit.
+    var_scale : float, optional
+        Scale factor for the variable. If None, will not scale the variable.
+    title : str, optional
+        Title for the plot. If None, will display variable name as title.
     cmap : list or str, optional
         Colormap to use for visualization. Default is Viridis256.
     width : int, optional
@@ -81,6 +59,9 @@ def create_datashader_map(
     agg_func : str, optional
         Aggregation function to use. Can be either 'mean' or 'nearest'.
         Default is 'mean'.
+    shared_figure : bokeh.plotting.figure.Figure, optional
+        If provided, the new plot will share some elements with the shared_figure.
+        Default is None.
     Returns
     -------
     bokeh.plotting.figure.Figure
@@ -112,7 +93,7 @@ def create_datashader_map(
     
     # Create a Bokeh figure with PlateCarree projection
     p = figure(
-        title=title if title is not None else combined_df.columns[-1],
+        title=title if title is not None else variable,
         x_axis_label='Longitude',
         y_axis_label='Latitude',
         width=width,
@@ -124,32 +105,32 @@ def create_datashader_map(
         aspect_ratio=aspect_ratio,  # Explicitly set the aspect ratio
         min_border_bottom=60,  # Add space for the colorbar
     )
-    
+    if shared_figure is not None:
+        p.x_range = shared_figure.x_range
+        p.y_range = shared_figure.y_range
+
     # Create Datashader canvas with higher resolution
     canvas_width = int(width * resolution)
     canvas_height = int(height * resolution)
     cvs = ds.Canvas(plot_width=canvas_width, plot_height=canvas_height, 
                     x_range=x_range, y_range=y_range)
     
-    # Get the value column name
-    value_col = combined_df.columns[-1]
-    
     # Aggregate the data based on the specified aggregation function
     if agg_func == 'mean':
-        agg = cvs.points(combined_df, 'lon', 'lat', ds.mean(value_col))
+        agg = cvs.points(combined_df, 'lon', 'lat', ds.mean(variable))
     elif agg_func == 'nearest':
-        agg = cvs.points(combined_df, 'lon', 'lat', ds.first(value_col))
+        agg = cvs.points(combined_df, 'lon', 'lat', ds.first(variable))
     else:
         raise ValueError("agg_func must be either 'mean' or 'nearest'")
     
     # Create a source for the image
     source = bokeh.models.ColumnDataSource({
-        'image': [agg.values],
+        'image': [agg.values*var_scale],
         'x': [x_range[0]],
         'y': [y_range[0]],
         'dw': [x_range[1] - x_range[0]],
         'dh': [y_range[1] - y_range[0]],
-        'values': [agg.values]  # Add the aggregated values
+        'values': [agg.values*var_scale]  # Add the aggregated values
     })
     
     if vmin is None:
@@ -181,7 +162,7 @@ def create_datashader_map(
         color_mapper=color_mapper,
         border_line_color=None,
         location=(0,0),
-        title=f'{value_col} [{unit}]' if unit is not None else value_col,
+        title=f'{variable} [{unit}]' if unit is not None else '-',
         width=width-100,
         height=20,
         orientation='horizontal',
@@ -243,127 +224,11 @@ def create_datashader_map(
         if xs_list:  # Only add if we have lines to draw
             p.multi_line(xs_list, ys_list, line_color='black', line_width=1)
     
-    return p
-
-def combine_da_list_to_df(da_list):
-    """
-    Combine a list of DataArrays into a single pandas DataFrame.
-    The pandas DataFrame will have the same number of rows as the number of 
-    high-resolution pixels in the combined DataArrays.
-    
-    Parameters
-    ----------
-    da_list : list of xarray.DataArray
-        List of DataArrays to combine.
-
-    Returns
-    -------
-    pandas.DataFrame
-        A DataFrame containing the combined data from all DataArrays.
-    """
-    if not da_list:
-        raise ValueError("da_list cannot be empty")
-    
-    # Combine all DataArrays into a single DataFrame
-    dfs = []
-    for da in da_list:
-        df = da.to_dataframe().reset_index()
-        dfs.append(df)
-    
-    combined_df = pd.concat(dfs, ignore_index=True)
-    return combined_df
-
-def get_grid_indices_in_range(mdata, lon_range, lat_range):
-    """
-    Find grid indices (grid_xt, grid_yt) for points within a specified lat/lon range.
-    
-    Parameters
-    ----------
-    mdata : xarray.Dataset or xarray.DataArray
-        Model data containing geolat_t and geolon_t coordinates
-    lon_range : tuple
-        Tuple of (min_lon, max_lon) in degrees
-    lat_range : tuple
-        Tuple of (min_lat, max_lat) in degrees
-    
-    Returns
-    -------
-    tuple
-        Two numpy arrays containing the grid_xt and grid_yt indices that fall within
-        the specified lat/lon range
-    """
-    # Get the lat/lon coordinates
-    lats = mdata.geolat_t
-    lons = mdata.geolon_t
-    
-    # Create masks for points within the ranges
-    lat_mask = (lats >= lat_range[0]) & (lats <= lat_range[1])
-    lon_mask = (lons >= lon_range[0]) & (lons <= lon_range[1])
-    
-    # Combine masks to find points within both ranges
-    combined_mask = lat_mask & lon_mask
-    
-    # Get the indices where the mask is True
-    grid_yt_indices, grid_xt_indices = np.where(combined_mask)
-    
-    # Add 1 to the indices to match the grid indices
-    return grid_xt_indices+1, grid_yt_indices+1
-
-def cube_sphere_face_min_max_lon_lat(cube_face):
-    """
-    Get the minimum and maximum longitude and latitude for a given cube face.
-    """
-    if cube_face == 1:
-        return (0.8439675569534302, 359.8221130371094, -35.174068450927734, 44.26972579956055)
-    elif cube_face == 2:
-        return (35.39055252075195, 124.60938262939453, -35.53116989135742, 44.60742950439453)
-    elif cube_face == 3:
-        return (0.16366428136825562, 359.95452880859375, 36.0015983581543, 84.08895874023438)
-    elif cube_face == 4:
-        return (125.39061737060547, 204.6916046142578, -44.60742950439453, 40.94393539428711)
-    elif cube_face == 5:
-        return (235.32156372070312, 304.6094665527344, -41.65079116821289, 44.60742950439453)
-    elif cube_face == 6:
-        return (0.39228981733322144, 359.9735107421875, -89.26538848876953, -36.722476959228516)
-    else:
-        raise ValueError(f'Invalid cube face: {cube_face}')
-    
-def get_cube_faces_in_range(lon_range, lat_range):
-    """
-    Determine which cube sphere faces contain data within the given lat/lon ranges.
-    
-    Parameters
-    ----------
-    lon_range : tuple
-        Tuple of (min_lon, max_lon) in degrees
-    lat_range : tuple
-        Tuple of (min_lat, max_lat) in degrees
-    
-    Returns
-    -------
-    list
-        List of cube face numbers (1-6) that contain data within the specified ranges
-    """
-    # Initialize list to store relevant cube faces
-    relevant_faces = []
-    
-    # Check each cube face
-    for face in range(1, 7):
-        face_min_lon, face_max_lon, face_min_lat, face_max_lat = cube_sphere_face_min_max_lon_lat(face)
-        
-        # Check if there's any overlap between the ranges
-        lon_overlap = (lon_range[0] <= face_max_lon and lon_range[1] >= face_min_lon)
-        lat_overlap = (lat_range[0] <= face_max_lat and lat_range[1] >= face_min_lat)
-        
-        # If both longitude and latitude ranges overlap, add this face
-        if lon_overlap and lat_overlap:
-            relevant_faces.append(face)
-    
-    return relevant_faces
+    return p 
 
 #%%
 # Base directories
-base_paths = {
+base_paths_disag = {
     'mdata': '/archive/m2p/awg/2023.04_orog_disag/'
              'c96L33_am4p0_cmip6Diag_orog_disag/'
              'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land_ptid/ts/'
@@ -372,11 +237,20 @@ base_paths = {
     'tid': '/archive/Rui.Wang/lightning_test_20250422/',
     'dem': '/archive/Rui.Wang/lightning_test_20250422/'
 }
+base_paths_ctrl = {
+    'mdata': '/archive/m2p/awg/2023.04/'
+             'c96L33_am4p0_cmip6Diag_a2p_irrHB_repro/'
+             'gfdl.ncrc5-intel23-classic-prod-openmp/pp/'
+             'land_ptid/ts/monthly/1yr/',
+    'ptile': '/archive/Marc.Prange/ptiles/',
+    'tid': '/archive/Rui.Wang/lightning_test_20250422/',
+    'dem': '/archive/Rui.Wang/lightning_test_20250422/'
+}
 # Setup parameters
-year_range = range(1980, 1982)
-var = 'precip'
-unit = 'mm/day'
-var_scale = 86400
+year_range = range(1980, 1990)
+vars = ['precip', 'Tgrnd']
+units = ['mm/day', 'K']
+load_tile_elevation = True
 project_width = 100 # number of sub-grid pixels to project high-res data onto
 project_height = 100
 use_multiprocessing = True
@@ -384,64 +258,45 @@ num_threads = os.cpu_count()
 # Select grid cells and create locstrs
 conus_lat_range = (25, 50)
 conus_lon_range = (-125+360, -67+360)
-cube_faces = get_cube_faces_in_range(conus_lon_range, conus_lat_range)
-# Load the model data
-mdata_paths = {cube_face: [os.path.join(base_paths['mdata'],
-            f'land_ptid.{year}01-{year}12.{var}.tile{cube_face}.nc') 
-            for year in year_range] for cube_face in cube_faces}
-mdata = {cube_face: 
-         xr.open_mfdataset(mdata_paths[cube_face])[f'{var}'].mean('time').load()*var_scale 
-         for cube_face in cube_faces}
-grid_indices = {cube_face: get_grid_indices_in_range(
-    mdata[cube_face], conus_lon_range, conus_lat_range) for cube_face in cube_faces}
-# Remove cube faces for which no grid indices are found
-for cube_face in cube_faces:
-    if grid_indices[cube_face][0].size == 0:
-        print(f'No grid indices found for cube face {cube_face}')
-        cube_faces.remove(cube_face)
-        del mdata[cube_face]
-        del grid_indices[cube_face]
-locstrs = {cube_face: create_locstrs(
-    cube_face, grid_indices[cube_face][0], grid_indices[cube_face][1]) 
-    for cube_face in cube_faces}
-# Load the ptile data
-ptile_data = {cube_face: load_ptile_data(cube_face, base_paths['ptile']) for cube_face in cube_faces}
 #%%
-
-#%%
-# Load and reprojectthe tid data
-tid_hr_data_list = {cube_face: get_tid_hr_data_for_locstrs(
-    locstrs[cube_face], base_paths['tid'], num_threads=num_threads, use_multiprocessing=use_multiprocessing,
-    project_width=project_width, project_height=project_height) for cube_face in cube_faces}
-#%%
-# Prepare lists of high-res data for each cell
-mdata_loc_hr_list = {cube_face: map_mdata_to_tid_hr_list(
-    mdata[cube_face], ptile_data[cube_face], tid_hr_data_list[cube_face], locstrs[cube_face]) 
-    for cube_face in cube_faces}
-#%%
-# Prepare lists of high-res DEM elevation data for each cell
-dem_data_hr_list = {cube_face: get_dem_terrain_data_for_locstrs(
-    locstrs[cube_face], base_paths['dem'], num_threads=num_threads, use_multiprocessing=use_multiprocessing,
-    project_width=project_width, project_height=project_height) for cube_face in cube_faces}
-#%%
-# Combine the data into dataframes (1D, HR pixel-by-pixel)
-mdata_df = pd.concat([combine_da_list_to_df(mdata_loc_hr_list[cube_face]) for cube_face in cube_faces], ignore_index=True)
-dem_data_df = pd.concat([combine_da_list_to_df(dem_data_hr_list[cube_face]) for cube_face in cube_faces], ignore_index=True)
-tid_data_df = pd.concat([combine_da_list_to_df(tid_hr_data_list[cube_face]) for cube_face in cube_faces], ignore_index=True)
+mdata_df_disag = load_hr_mdata(
+    conus_lon_range, conus_lat_range, year_range, vars, base_paths_disag,
+    project_width=project_width, project_height=project_height, 
+    use_multiprocessing=use_multiprocessing, num_threads=num_threads,
+    add_tile_elevation=load_tile_elevation)
+mdata_df_ctrl = load_hr_mdata(
+    conus_lon_range, conus_lat_range, year_range, vars, base_paths_ctrl,
+    project_width=project_width, project_height=project_height, 
+    use_multiprocessing=use_multiprocessing, num_threads=num_threads,
+    add_tile_elevation=load_tile_elevation)
 #%%
 # Create datashader maps
 plot1 = create_datashader_map(
-    mdata_df, title=var, unit=unit, resolution=1, show_borders=True, 
+    mdata_df_disag, variable='precip', unit='mm/day', var_scale=86400,
+    resolution=1, show_borders=True,
     cmap=all_palettes['Viridis'][256], agg_func='mean',
     vmin=0, vmax=6)
 plot2 = create_datashader_map(
-    dem_data_df, title='tile elevation', unit='m', resolution=1, show_borders=True,
-    cmap=all_palettes['Viridis'][256], agg_func='mean')
+    mdata_df_ctrl, variable='precip', unit='mm/day', var_scale=86400,
+    resolution=1, show_borders=True,
+    cmap=all_palettes['Viridis'][256], agg_func='mean',
+    vmin=0, vmax=6, shared_figure=plot1)
+precip_diff = mdata_df_disag.copy()
+precip_diff['precip'] = mdata_df_disag['precip'] - mdata_df_ctrl['precip']
 plot3 = create_datashader_map(
-    tid_data_df, title='tile ID', resolution=1, show_borders=True,
-    cmap=all_palettes['Iridescent'][tid_data_df['tile ID'].max()],
-    vmin=0, vmax=tid_data_df['tile ID'].max(), agg_func='nearest')
-all_plots = row(plot1, plot2, plot3)
+    precip_diff, variable='precip', unit='mm/day', var_scale=86400,
+    title='$\Delta$precip (disag - ctrl)', resolution=1, show_borders=True,
+    cmap=all_palettes['RdBu'][11], agg_func='mean',
+    vmin=-2, vmax=2, shared_figure=plot1)
+plot4 = create_datashader_map(
+    mdata_df_ctrl, variable='elevation', unit='m', resolution=1, show_borders=True,
+    cmap=all_palettes['Viridis'][256], agg_func='mean', shared_figure=plot1)
+plot5 = create_datashader_map(
+    mdata_df_ctrl, variable='tid', unit='-', resolution=1, show_borders=True,
+    cmap=all_palettes['Iridescent'][mdata_df_ctrl['tid'].max()],
+    vmin=0, vmax=mdata_df_ctrl['tid'].max(), agg_func='nearest', shared_figure=plot1)
+all_plots = gridplot([[plot1, plot2, plot3], [plot4, plot5]])
+show(all_plots)
 #%%
 # Save the plots as HTML
-save(all_plots, filename='tile_maps_orog_disag_lr.html')
+# save(all_plots, filename='tile_maps_orog_disag_lr.html')
